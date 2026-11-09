@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct NotesListScreen: View {
+    @ObservedObject private var api = API.shared
     @State private var notes: [NoteSummary] = []
     @State private var tags: [Tag] = []
     @State private var selectedTag: String?
@@ -20,6 +21,10 @@ struct NotesListScreen: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    if api.isOffline {
+                        OfflineBanner()
+                    }
+
                     NavigationLink { SearchScreen() } label: {
                         HStack {
                             Image(systemName: "magnifyingglass")
@@ -42,15 +47,17 @@ struct NotesListScreen: View {
                         }
                     }
 
-                    if !error.isEmpty {
+                    if !error.isEmpty && !api.isOffline {
                         Text(error).font(.footnote).foregroundStyle(AppTheme.danger)
                     }
 
-                    if notes.isEmpty && error.isEmpty {
+                    if notes.isEmpty {
                         EmptyState(
                             icon: "doc.text",
-                            title: "No notes yet — create your first note",
-                            text: "A thought, a list, or a voice memo is a perfect place to begin."
+                            title: api.isOffline ? "No downloaded (.sma) notes" : "No notes yet — create your first note",
+                            text: api.isOffline
+                                ? "Download notes while online to access their .sma copies offline."
+                                : "A thought, a list, or a voice memo is a perfect place to begin."
                         )
                         .frame(maxWidth: .infinity)
                     }
@@ -66,28 +73,24 @@ struct NotesListScreen: View {
             .navigationTitle("Notes")
             .toolbar {
                 NavigationLink { GroupNotesListScreen() } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                        Text("Group notes").font(.caption.bold())
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(AppTheme.surface)
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.border))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    Label("Group notes", systemImage: "bubble.left.and.bubble.right")
+                        .font(.caption.bold())
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                NavigationLink { NoteScreen() } label: {
-                    Image(systemName: "plus")
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
-                        .frame(width: 54, height: 54)
-                        .background(AppTheme.accent)
-                        .clipShape(Circle())
-                        .shadow(color: AppTheme.accent.opacity(0.35), radius: 8, y: 4)
+                if !api.isOffline {
+                    NavigationLink { NoteScreen() } label: {
+                        Image(systemName: "plus")
+                            .font(.title2.bold())
+                            .foregroundStyle(.white)
+                            .frame(width: 54, height: 54)
+                            .background(AppTheme.accent)
+                            .clipShape(Circle())
+                            .shadow(color: AppTheme.accent.opacity(0.35), radius: 8, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(20)
                 }
-                .padding(20)
             }
             .navigationDestination(item: $openNoteId) { NoteScreen(noteId: $0) }
             .refreshable { await load() }
@@ -117,6 +120,7 @@ struct NotesListScreen: View {
                 .overlay(Capsule().stroke(selected ? AppTheme.ink : AppTheme.border))
                 .clipShape(Capsule())
         }
+        .buttonStyle(.plain)
     }
 
     private func tap(_ note: NoteSummary) {
@@ -124,15 +128,35 @@ struct NotesListScreen: View {
     }
 
     private func unlock(_ note: NoteSummary) async {
-        do {
-            try await API.shared.send("POST", "/api/notes/\(note.id)/verify-lock", body: ["password": password])
-            openNoteId = note.id
-            error = ""
-        } catch {
-            self.error = error.localizedDescription
+            // If offline, verify against the encrypted .sma file!
+            if api.isOffline {
+                if OfflineStore.verifyOfflineLock(noteId: note.id, password: password) {
+                    openNoteId = note.id
+                    self.error = ""
+                } else {
+                    self.error = "Incorrect password for offline note."
+                }
+                password = ""
+                return
+            }
+            do {
+                try await API.shared.send("POST", "/api/notes/\(note.id)/verify-lock", body: ["password": password])
+                // Also keep the .sma file's password synced!
+                if OfflineStore.isOffline(note.id) {
+                    OfflineStore.updateLockPassword(noteId: note.id, isLocked: true, newPassword: password)
+                }
+                openNoteId = note.id
+                self.error = ""
+            } catch {
+                if OfflineStore.verifyOfflineLock(noteId: note.id, password: password) {
+                    openNoteId = note.id
+                    self.error = ""
+                } else {
+                    self.error = error.localizedDescription
+                }
+            }
+            password = ""
         }
-        password = ""
-    }
 
     private func load() async {
         do {
@@ -140,6 +164,8 @@ struct NotesListScreen: View {
             tags = (try? await API.shared.tags()) ?? []
             error = ""
         } catch {
+            // Offline fallback: show downloaded .sma notes!
+            notes = OfflineStore.allOfflineSummaries(type: "personal", tag: selectedTag)
             self.error = error.localizedDescription
         }
     }
@@ -151,7 +177,7 @@ struct NoteCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top) {
-                Text(note.title.isEmpty ? "Untitled note" : note.title)
+                Text(note.title)
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
@@ -166,7 +192,7 @@ struct NoteCard: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     if OfflineStore.isOffline(note.id) {
-                        Text("Offline")
+                        Text("Offline (.sma)")
                             .font(.system(size: 9, weight: .heavy))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 4)
@@ -186,10 +212,25 @@ struct NoteCard: View {
             }
 
             let clean = note.snippet.plainText
-            Text(note.isLocked ? "Locked note" : (clean.isEmpty ? "Start writing…" : clean))
-                .font(.footnote)
-                .foregroundStyle(AppTheme.inkSoft)
-                .lineLimit(3)
+            if note.isLocked {
+                Text("Locked note")
+                    .font(.footnote)
+                    .foregroundStyle(AppTheme.inkSoft)
+            } else if clean.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "mic.fill")
+                        .font(.caption2)
+                        .foregroundStyle(AppTheme.accentHover)
+                    Text("Voice / attachment note")
+                        .font(.footnote)
+                        .foregroundStyle(AppTheme.inkSoft)
+                }
+            } else {
+                Text(clean)
+                    .font(.footnote)
+                    .foregroundStyle(AppTheme.inkSoft)
+                    .lineLimit(3)
+            }
 
             HStack {
                 Spacer()

@@ -5,9 +5,9 @@
 //  Created by M_Salik_Amin_Kayani on 09/11/2026.
 //
 
-
 import SwiftUI
 import AVFoundation
+import CoreMedia
 import Combine
 
 @MainActor
@@ -82,15 +82,34 @@ struct VoiceRow: View {
     var onDelete: () -> Void = {}
 
     @State private var player: AVPlayer?
+    @State private var timeObserver: Any?
     @State private var playing = false
+    @State private var currentTime: Double = 0
     @State private var showText = false
 
+    private var totalDuration: Double {
+        Double(max(voice.durationSeconds ?? 18, 1))
+    }
+
+    private var progressRatio: Double {
+        min(max(currentTime / totalDuration, 0), 1)
+    }
+
+    // Plays from local offline .wav file first if downloaded!
     private var resolvedURL: URL? {
+        if let local = OfflineStore.hasLocalVoice(voiceId: voice.id, filePath: voice.filePath) {
+            return local
+        }
         if voice.filePath.hasPrefix("http") {
             return URL(string: voice.filePath)
         }
         let path = voice.filePath.hasPrefix("/") ? voice.filePath : "/" + voice.filePath
         return URL(string: API.shared.baseURL + path)
+    }
+
+    private func formatSeconds(_ val: Double) -> String {
+        let s = Int(max(0, round(val)))
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 
     var body: some View {
@@ -110,26 +129,38 @@ struct VoiceRow: View {
                     .font(.system(size: 10, weight: .heavy))
                     .foregroundStyle(AppTheme.ink)
                     .lineLimit(1)
-                if let s = voice.durationSeconds {
-                    Text(String(format: "0:00 / %d:%02d", s / 60, s % 60))
-                        .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(AppTheme.muted)
-                }
+                Text("\(formatSeconds(currentTime)) / \(formatSeconds(totalDuration))")
+                    .font(.system(size: 9).monospacedDigit())
+                    .foregroundStyle(AppTheme.muted)
                 Button("See text") { showText = true }
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(AppTheme.accentHover)
+                    .buttonStyle(.plain)
             }
+            .frame(width: 105, alignment: .leading)
 
-            Spacer(minLength: 6)
-
-            // Mockup waveform bars
-            HStack(spacing: 2.5) {
-                ForEach(0..<18, id: \.self) { idx in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(playing && idx < 9 ? AppTheme.accent : AppTheme.borderStrong)
-                        .frame(width: 3, height: CGFloat(7 + ((idx * 7) % 15)))
+            GeometryReader { geo in
+                let barCount = 24
+                HStack(spacing: 3) {
+                    ForEach(0..<barCount, id: \.self) { idx in
+                        let barFraction = Double(idx) / Double(barCount - 1)
+                        let isPlayed = barFraction <= progressRatio
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(isPlayed ? AppTheme.accent : AppTheme.borderStrong)
+                            .frame(maxWidth: .infinity, maxHeight: CGFloat(8 + ((idx * 7) % 16)))
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let ratio = min(max(value.location.x / max(geo.size.width, 1), 0), 1)
+                            seek(to: ratio * totalDuration)
+                        }
+                )
             }
+            .frame(height: 30)
 
             if showDelete {
                 Button(role: .destructive, action: onDelete) {
@@ -144,7 +175,15 @@ struct VoiceRow: View {
         .softCard(radius: 15)
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { _ in
             playing = false
+            currentTime = 0
             player?.seek(to: .zero)
+        }
+        .onDisappear {
+            if let obs = timeObserver {
+                player?.removeTimeObserver(obs)
+                timeObserver = nil
+            }
+            player?.pause()
         }
         .sheet(isPresented: $showText) {
             VStack(alignment: .leading, spacing: 12) {
@@ -175,13 +214,35 @@ struct VoiceRow: View {
         }
     }
 
-    private func toggle() {
-        if player == nil, let url = resolvedURL {
-            try? AVAudioSession.sharedInstance().setCategory(.playback)
-            try? AVAudioSession.sharedInstance().setActive(true)
-            player = AVPlayer(url: url)
+    private func setupPlayerIfNeeded() {
+        guard player == nil, let url = resolvedURL else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let av = AVPlayer(url: url)
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+        timeObserver = av.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            let secs = CMTimeGetSeconds(time)
+            if secs.isFinite && secs >= 0 {
+                currentTime = min(secs, totalDuration)
+            }
         }
-        if playing { player?.pause() } else { player?.play() }
+        player = av
+    }
+
+    private func seek(to seconds: Double) {
+        setupPlayerIfNeeded()
+        currentTime = seconds
+        let target = CMTime(seconds: seconds, preferredTimescale: 600)
+        player?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    private func toggle() {
+        setupPlayerIfNeeded()
+        if playing {
+            player?.pause()
+        } else {
+            player?.play()
+        }
         playing.toggle()
     }
 }

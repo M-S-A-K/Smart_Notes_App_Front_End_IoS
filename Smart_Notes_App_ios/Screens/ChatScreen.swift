@@ -5,10 +5,20 @@
 //  Created by M_Salik_Amin_Kayani on 08/11/2026.
 //
 
+//
+//  ChatScreen.swift
+//  Smart_Notes_App_ios
+//
+
 import SwiftUI
 
 struct ChatScreen: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject private var socket = RealtimeSocket.shared
     @State private var friends: [Person] = []
+    @State private var unreadCounts: [Int: Int] = [:]
+    @State private var lastSnippets: [Int: String] = [:]
+    @State private var lastTimes: [Int: String] = [:]
     @State private var query = ""
     @State private var showAdd = false
     @State private var linkOrCode = ""
@@ -16,11 +26,18 @@ struct ChatScreen: View {
     @State private var statusBanner = ""
     @State private var error = ""
 
-    private var filteredFriends: [Person] {
+    private var sortedFriends: [Person] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return friends }
-        return friends.filter {
-            $0.fullName.lowercased().contains(q) || $0.email.lowercased().contains(q)
+        let base = q.isEmpty ? friends : friends.filter {
+            $0.fullName.lowercased().contains(q) ||
+            $0.email.lowercased().contains(q) ||
+            (lastSnippets[$0.id]?.lowercased().contains(q) ?? false)
+        }
+        return base.sorted { a, b in
+            let ua = unreadCounts[a.id] ?? 0
+            let ub = unreadCounts[b.id] ?? 0
+            if ua != ub { return ua > ub } // Unread chats always at the top!
+            return (lastTimes[a.id] ?? "") > (lastTimes[b.id] ?? "")
         }
     }
 
@@ -51,7 +68,7 @@ struct ChatScreen: View {
                         Text(error).font(.footnote).foregroundStyle(AppTheme.danger)
                     }
 
-                    if filteredFriends.isEmpty {
+                    if sortedFriends.isEmpty {
                         EmptyState(
                             icon: "bubble.left",
                             title: query.isEmpty ? "No chats yet" : "No conversations found",
@@ -62,25 +79,48 @@ struct ChatScreen: View {
                         .frame(maxWidth: .infinity)
                     }
 
-                    ForEach(filteredFriends) { f in
+                    ForEach(sortedFriends) { f in
+                        let unread = unreadCounts[f.id] ?? 0
                         NavigationLink { ChatThread(friend: f) } label: {
                             HStack(spacing: 12) {
                                 Avatar(name: f.fullName)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(f.fullName)
-                                        .font(.subheadline.bold())
-                                        .foregroundStyle(AppTheme.ink)
-                                    Text(f.email)
-                                        .font(.caption)
-                                        .foregroundStyle(AppTheme.inkSoft)
+                                    HStack {
+                                        Text(f.fullName)
+                                            .font(.subheadline.weight(unread > 0 ? .heavy : .bold))
+                                            .foregroundStyle(AppTheme.ink)
+                                        Spacer()
+                                        if let t = lastTimes[f.id], !t.isEmpty {
+                                            Text(t.asDate?.formatted(date: .omitted, time: .shortened) ?? "")
+                                                .font(.caption2.weight(unread > 0 ? .bold : .regular))
+                                                .foregroundStyle(unread > 0 ? AppTheme.accentHover : AppTheme.muted)
+                                        }
+                                    }
+                                    HStack {
+                                        Text(lastSnippets[f.id] ?? f.email)
+                                            .font(.caption.weight(unread > 0 ? .semibold : .regular))
+                                            .foregroundStyle(unread > 0 ? AppTheme.ink : AppTheme.inkSoft)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        // Unread count circle badge!
+                                        if unread > 0 {
+                                            Text("\(unread)")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundStyle(.white)
+                                                .frame(minWidth: 22, minHeight: 22)
+                                                .padding(.horizontal, 4)
+                                                .background(AppTheme.accent)
+                                                .clipShape(Circle())
+                                        }
+                                    }
                                 }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption)
-                                    .foregroundStyle(AppTheme.muted)
                             }
                             .padding(12)
-                            .softCard(radius: 14)
+                            .softCard(
+                                radius: 14,
+                                background: unread > 0 ? AppTheme.accentSofter : AppTheme.surface,
+                                borderColor: unread > 0 ? AppTheme.accent.opacity(0.45) : AppTheme.border
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -92,15 +132,17 @@ struct ChatScreen: View {
             .toolbar {
                 Button { showAdd = true } label: {
                     Image(systemName: "plus")
-                        .frame(width: 36, height: 36)
-                        .background(AppTheme.surface)
-                        .overlay(RoundedRectangle(cornerRadius: 11).stroke(AppTheme.border))
-                        .clipShape(RoundedRectangle(cornerRadius: 11))
                 }
             }
             .sheet(isPresented: $showAdd) { addContactSheet }
             .refreshable { await load() }
-            .onAppear { Task { await load() } }
+            .onAppear {
+                socket.start()
+                Task { await load() }
+            }
+            .onChange(of: socket.tick) { _, _ in
+                Task { await load() }
+            }
         }
     }
 
@@ -160,6 +202,7 @@ struct ChatScreen: View {
                             .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .buttonStyle(.plain)
 
                     if !error.isEmpty {
                         Text(error).font(.caption).foregroundStyle(AppTheme.danger)
@@ -176,7 +219,7 @@ struct ChatScreen: View {
         guard !key.isEmpty else { return }
         do {
             try await API.shared.send("POST", "/api/friends", body: ["emailOrPhone": key])
-            linkOrCode = ""; manualEmailOrPhone = ""; error = ""
+            linkOrCode = ""; manualEmailOrPhone = ""; self.error = ""
             showAdd = false
             statusBanner = "Contact added"
             await load()
@@ -188,9 +231,22 @@ struct ChatScreen: View {
     }
 
     private func load() async {
+        let myId = state.user?.userId ?? 0
         do {
-            friends = try await API.shared.friends()
-            error = ""
+            let list = try await API.shared.friends()
+            friends = list
+            self.error = ""
+            for f in list {
+                if let msgs = try? await API.shared.messages(f.id) {
+                    let unread = msgs.filter { $0.senderId == f.id && ($0.isRead == false) }.count
+                    unreadCounts[f.id] = unread
+                    if let last = msgs.last {
+                        lastSnippets[f.id] = last.messageText ?? (last.sharedTitle != nil ? "📄 Shared a note: \(last.sharedTitle!)" : f.email)
+                        lastTimes[f.id] = last.sentAt
+                    }
+                }
+            }
+            _ = myId
         } catch {
             self.error = error.localizedDescription
         }
@@ -199,6 +255,7 @@ struct ChatScreen: View {
 
 struct ChatThread: View {
     @EnvironmentObject var state: AppState
+    @ObservedObject private var socket = RealtimeSocket.shared
     @Environment(\.dismiss) private var dismiss
     let friend: Person
 
@@ -251,6 +308,8 @@ struct ChatThread: View {
                         .font(.title3)
                         .foregroundStyle(AppTheme.inkSoft)
                 }
+                .buttonStyle(.plain)
+
                 TextField("Write a message…", text: $text)
                     .padding(.horizontal, 14)
                     .frame(height: 44)
@@ -265,6 +324,7 @@ struct ChatThread: View {
                         .background(AppTheme.accent)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
+                .buttonStyle(.plain)
             }
             .padding(12)
             .background(AppTheme.surface)
@@ -287,7 +347,7 @@ struct ChatThread: View {
                         }
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(note.title.isEmpty ? "Untitled note" : note.title).font(.subheadline.bold())
+                            Text(note.title).font(.subheadline.bold())
                             Text(note.snippet.plainText).font(.caption).foregroundStyle(AppTheme.inkSoft).lineLimit(1)
                         }
                     }
@@ -323,8 +383,12 @@ struct ChatThread: View {
             )
         }
         .task {
+            socket.start()
             notes = ((try? await API.shared.notes(type: "personal")) ?? []).filter { !$0.isLocked }
             await load()
+        }
+        .onChange(of: socket.tick) { _, _ in
+            Task { await load() }
         }
     }
 
@@ -343,7 +407,7 @@ struct ChatThread: View {
         do {
             messages = try await API.shared.messages(friend.id)
             try? await API.shared.send("PUT", "/api/messages/read-all/\(friend.id)")
-            error = ""
+            self.error = ""
         } catch {
             self.error = error.localizedDescription
         }
@@ -405,7 +469,19 @@ struct BubbleView: View {
                         }
 
                         if let loc = message.payload?.location {
-                            MapPreviewCard(placeName: loc.placeName, subLocation: loc.subLocation)
+                            MapPreviewCard(
+                                placeName: loc.placeName,
+                                subLocation: loc.subLocation,
+                                latitude: loc.latitude,
+                                longitude: loc.longitude
+                            )
+                        }
+                        if let rem = message.payload?.reminder {
+                            ReminderPreviewCard(
+                                title: rem.title,
+                                remindAt: rem.remindAt,
+                                isDone: rem.isDone ?? false
+                            )
                         }
                         if let voices = message.payload?.voices {
                             ForEach(voices) { v in
@@ -428,9 +504,16 @@ struct BubbleView: View {
                     .frame(maxWidth: 300, alignment: .leading)
                     .softCard(radius: 16)
                 }
-                Text(message.sentAt.asDate?.formatted(date: .omitted, time: .shortened) ?? "")
-                    .font(.system(size: 9))
-                    .foregroundStyle(AppTheme.muted)
+                HStack(spacing: 4) {
+                    Text(message.sentAt.asDate?.formatted(date: .omitted, time: .shortened) ?? "")
+                        .font(.system(size: 9))
+                        .foregroundStyle(AppTheme.muted)
+                    if mine {
+                        Image(systemName: (message.isRead == true) ? "checkmark.circle.fill" : "checkmark")
+                            .font(.system(size: 9))
+                            .foregroundStyle((message.isRead == true) ? AppTheme.accentHover : AppTheme.muted)
+                    }
+                }
             }
 
             if !mine { Spacer(minLength: 45) }

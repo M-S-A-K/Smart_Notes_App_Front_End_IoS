@@ -5,8 +5,8 @@
 //  Created by M_Salik_Amin_Kayani on 08/11/2026.
 //
 
-
 import Foundation
+import Combine
 
 struct APIError: LocalizedError {
     let message: String
@@ -15,26 +15,94 @@ struct APIError: LocalizedError {
 
 struct Empty: Decodable {}
 
-final class API {
+// MARK: - Simple WebSocket + Live Auto-Sync Manager for Chat & Group Notes
+@MainActor
+final class RealtimeSocket: ObservableObject {
+    static let shared = RealtimeSocket()
+
+    @Published var tick: Int = 0
+    private var webSocketTask: URLSessionWebSocketTask?
+    private var timer: Timer?
+
+    func start() {
+        connectWebSocket()
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.tick &+= 1
+            }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+    }
+
+    private func connectWebSocket() {
+        let wsBase = API.shared.baseURL
+            .replacingOccurrences(of: "https://", with: "wss://")
+            .replacingOccurrences(of: "http://", with: "ws://")
+        guard let url = URL(string: "\(wsBase)/ws?userId=\(API.shared.userId ?? 0)") else { return }
+        let task = URLSession.shared.webSocketTask(with: url)
+        self.webSocketTask = task
+        task.resume()
+        listen()
+    }
+
+    private func listen() {
+        webSocketTask?.receive { [weak self] result in
+            guard let self else { return }
+            if case .success = result {
+                Task { @MainActor in
+                    self.tick &+= 1
+                    self.listen()
+                }
+            }
+        }
+    }
+
+    func notifyChange(_ event: String = "refresh") {
+        webSocketTask?.send(.string(event)) { _ in }
+        tick &+= 1
+    }
+}
+
+final class API: ObservableObject {
     static let shared = API()
 
-    // Simulator uses localhost. On a physical iPhone, replace with your Mac's local IP.
     let baseURL = "http://localhost:5262"
+    //let baseURL = "http://192.168.100.107:5262"
+
     var userId: Int?
+    @Published var isOffline: Bool = false
 
     func request<T: Decodable>(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> T {
         guard let url = URL(string: baseURL + path) else { throw APIError(message: "Invalid URL") }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        req.timeoutInterval = 8
         if let userId { req.setValue(String(userId), forHTTPHeaderField: "X-User-Id") }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
 
-        let (data, response) = try await URLSession.shared.data(for: req)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: req)
+            Task { @MainActor in self.isOffline = false }
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            throw urlError
+        } catch {
+            Task { @MainActor in self.isOffline = true }
+            throw APIError(message: "You are offline")
+        }
 
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
             throw APIError(message: message ?? "Server error (\(code))")
@@ -75,7 +143,11 @@ final class API {
     }
 
     func noteDetail(_ id: Int) async throws -> NoteDetail {
-        try await request("GET", "/api/notes/\(id)")
+        let d: NoteDetail = try await request("GET", "/api/notes/\(id)")
+        if OfflineStore.isOffline(id) && d.noteType == "personal" {
+            OfflineStore.saveSma(detail: d)
+        }
+        return d
     }
 
     func createNote(title: String, content: String, noteType: String = "personal") async throws -> Int {
@@ -95,21 +167,35 @@ final class API {
         return c.id
     }
 
+    func toggleReminder(noteId: Int, reminderId: Int) async throws {
+        try await send("PUT", "/api/notes/\(noteId)/reminders/\(reminderId)/toggle")
+    }
+
     func tags() async throws -> [Tag] {
         try await request("GET", "/api/notes/tags")
     }
 
     func calendar() async throws -> [CalendarItem] {
-        try await request("GET", "/api/notes/calendar")
+        let items: [CalendarItem] = try await request("GET", "/api/notes/calendar")
+        await ReminderAlarmManager.shared.syncReminders(items)
+        return items
     }
 
-    // MARK: Group Notes
+    // MARK: Group Notes & Exclusions
     func members(_ noteId: Int) async throws -> [Person] {
         try await request("GET", "/api/notes/\(noteId)/members")
     }
 
     func contributions(_ noteId: Int) async throws -> [Contribution] {
         try await request("GET", "/api/notes/\(noteId)/contributions")
+    }
+
+    func excludeMember(noteId: Int, contributionId: Int, targetUserId: Int) async throws {
+        try await send(
+            "POST",
+            "/api/notes/\(noteId)/contributions/\(contributionId)/exclude",
+            body: ["excludedUserId": targetUserId, "userId": targetUserId]
+        )
     }
 
     // MARK: Friends & Chat
@@ -131,6 +217,7 @@ final class API {
         if let text { body["text"] = text }
         if let noteId { body["sharedNoteId"] = noteId }
         try await send("POST", "/api/messages/\(friendId)", body: body)
+        await RealtimeSocket.shared.notifyChange("chat:\(friendId)")
     }
 
     // MARK: Search & Profile

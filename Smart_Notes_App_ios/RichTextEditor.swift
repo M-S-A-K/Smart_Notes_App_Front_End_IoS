@@ -9,7 +9,13 @@ import Combine
 
 enum RichHTML {
     static let baseSize: CGFloat = 17
-    static let ink = UIColor(red: 23 / 255, green: 35 / 255, blue: 38 / 255, alpha: 1)
+    static var ink: UIColor {
+        UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 241 / 255, green: 247 / 255, blue: 248 / 255, alpha: 1)
+                : UIColor(red: 23 / 255, green: 35 / 255, blue: 38 / 255, alpha: 1)
+        }
+    }
 
     static var baseAttributes: [NSAttributedString.Key: Any] {
         let style = NSMutableParagraphStyle()
@@ -203,16 +209,11 @@ final class RichTextEditorController: ObservableObject {
     @Published var fontFamily: String = "Arial"
     var onHTMLChange: ((String) -> Void)?
 
-    func setHTML(_ html: String) {
-        guard let tv = textView else { return }
-        let current = RichHTML.html(from: tv.attributedText)
-        if current != html {
-            tv.attributedText = RichHTML.attributed(from: html)
-        }
-    }
+    static let romans = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"]
 
     func toggleTrait(_ trait: UIFontDescriptor.SymbolicTraits) {
         guard let tv = textView else { return }
+        if !tv.isFirstResponder { tv.becomeFirstResponder() }
         let range = tv.selectedRange
         if range.length > 0 {
             let m = NSMutableAttributedString(attributedString: tv.attributedText)
@@ -241,6 +242,7 @@ final class RichTextEditorController: ObservableObject {
 
     func toggleAttribute(_ key: NSAttributedString.Key) {
         guard let tv = textView else { return }
+        if !tv.isFirstResponder { tv.becomeFirstResponder() }
         let range = tv.selectedRange
         if range.length > 0 {
             let m = NSMutableAttributedString(attributedString: tv.attributedText)
@@ -261,6 +263,7 @@ final class RichTextEditorController: ObservableObject {
     func applyFontSize(_ size: CGFloat, label: String) {
         fontSizeLabel = label
         guard let tv = textView else { return }
+        if !tv.isFirstResponder { tv.becomeFirstResponder() }
         let range = tv.selectedRange
         if range.length > 0 {
             let m = NSMutableAttributedString(attributedString: tv.attributedText)
@@ -293,6 +296,7 @@ final class RichTextEditorController: ObservableObject {
     func applyFontFamily(_ family: String) {
         fontFamily = family
         guard let tv = textView else { return }
+        if !tv.isFirstResponder { tv.becomeFirstResponder() }
         let range = tv.selectedRange
         let size = ((tv.typingAttributes[.font] as? UIFont)?.pointSize) ?? RichHTML.baseSize
         let chosen = UIFont(name: family, size: size) ?? UIFont.systemFont(ofSize: size)
@@ -311,6 +315,7 @@ final class RichTextEditorController: ObservableObject {
 
     func applyAlignment(_ alignment: NSTextAlignment) {
         guard let tv = textView else { return }
+        if !tv.isFirstResponder { tv.becomeFirstResponder() }
         let ns = tv.text as NSString
         let lineRange = ns.lineRange(for: tv.selectedRange)
         let m = NSMutableAttributedString(attributedString: tv.attributedText)
@@ -329,16 +334,70 @@ final class RichTextEditorController: ObservableObject {
         tv.typingAttributes = typing
     }
 
-    func insertListPrefix(_ prefix: String) {
+    // Full Multi-line List Support (Bullet, Numbered, Roman, Checklist)
+    func applyListStyle(_ kind: String) {
         guard let tv = textView else { return }
+        if !tv.isFirstResponder { tv.becomeFirstResponder() }
+
         let ns = tv.text as NSString
-        let lineRange = ns.lineRange(for: tv.selectedRange)
+        if ns.length == 0 {
+            let firstPrefix: String
+            switch kind {
+            case "number": firstPrefix = "1. "
+            case "roman": firstPrefix = "i. "
+            case "checklist": firstPrefix = "☐ "
+            default: firstPrefix = "• "
+            }
+            tv.attributedText = NSAttributedString(string: firstPrefix, attributes: RichHTML.baseAttributes)
+            tv.selectedRange = NSRange(location: (firstPrefix as NSString).length, length: 0)
+            notifyChange()
+            return
+        }
+
+        let sel = tv.selectedRange
+        let lineRange = ns.lineRange(for: sel)
+        let blockText = ns.substring(with: lineRange)
+        let hasTrailingNewline = blockText.hasSuffix("\n")
+        var lines = blockText.components(separatedBy: "\n")
+        if hasTrailingNewline && lines.last == "" {
+            lines.removeLast()
+        }
+
+        let transformed = lines.enumerated().map { idx, line -> String in
+            let stripped = Self.stripExistingListPrefix(from: line)
+            let p: String
+            switch kind {
+            case "number": p = "\(idx + 1). "
+            case "roman":
+                let r = idx < Self.romans.count ? Self.romans[idx] : "\(idx + 1)"
+                p = "\(r). "
+            case "checklist": p = "☐ "
+            default: p = "• "
+            }
+            // If user clicked the same list style again on a single line, toggle it off
+            if lines.count == 1 && line.hasPrefix(p) {
+                return stripped
+            }
+            return p + stripped
+        }.joined(separator: "\n") + (hasTrailingNewline ? "\n" : "")
+
         let m = NSMutableAttributedString(attributedString: tv.attributedText)
-        m.replaceCharacters(in: NSRange(location: lineRange.location, length: 0),
-                            with: NSAttributedString(string: prefix, attributes: RichHTML.baseAttributes))
+        let replacement = NSAttributedString(string: transformed, attributes: RichHTML.baseAttributes)
+        m.replaceCharacters(in: lineRange, with: replacement)
         tv.attributedText = m
-        tv.selectedRange = NSRange(location: lineRange.location + prefix.count, length: 0)
+        let newCursor = lineRange.location + (transformed as NSString).length - (hasTrailingNewline ? 1 : 0)
+        tv.selectedRange = NSRange(location: max(0, newCursor), length: 0)
         notifyChange()
+    }
+
+    static func stripExistingListPrefix(from line: String) -> String {
+        for p in ["• ", "☐ ", "☑ "] {
+            if line.hasPrefix(p) { return String(line.dropFirst(p.count)) }
+        }
+        if let r = line.range(of: #"^(\d+|[ivx]+)\.\s"#, options: .regularExpression) {
+            return String(line[r.upperBound...])
+        }
+        return line
     }
 
     func notifyChange() {
@@ -352,7 +411,6 @@ struct FormatBar: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Row 1: Style, Size, Font Family (matches mockup)
             HStack(spacing: 6) {
                 Menu {
                     ForEach(["Body", "Heading 1", "Heading 2", "Heading 3", "Quote"], id: \.self) { item in
@@ -379,7 +437,6 @@ struct FormatBar: View {
                 }
             }
 
-            // Row 2: B, I, U, S, Alignments, List dropdown
             HStack(spacing: 4) {
                 toolButton(label: "B", bold: true) { controller.toggleTrait(.traitBold) }
                 toolButton(label: "I", italic: true) { controller.toggleTrait(.traitItalic) }
@@ -395,12 +452,13 @@ struct FormatBar: View {
                 Divider().frame(height: 20)
 
                 Menu {
-                    Button("• Plain bullet") { controller.insertListPrefix("• ") }
-                    Button("1, 2, 3") { controller.insertListPrefix("1. ") }
-                    Button("i, ii, iii") { controller.insertListPrefix("i. ") }
-                    Button("Checklist") { controller.insertListPrefix("☐ ") }
+                    Button("• Plain bullet") { controller.applyListStyle("bullet") }
+                    Button("1, 2, 3") { controller.applyListStyle("number") }
+                    Button("i, ii, iii") { controller.applyListStyle("roman") }
+                    Button("☑ Checklist") { controller.applyListStyle("checklist") }
                 } label: {
                     HStack(spacing: 4) {
+                        Image(systemName: "list.bullet").font(.system(size: 11, weight: .bold))
                         Text("List").font(.caption2.bold())
                         Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
                     }
@@ -510,6 +568,66 @@ struct RichTextEditor: UIViewRepresentable {
                 parent.html = encoded
             }
         }
+
+        // Toggle ☐ <-> ☑ when user taps a checklist box, and auto-continue lists on Return!
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            let sel = textView.selectedRange
+            guard sel.length == 0, sel.location > 0 else { return }
+            let ns = textView.text as NSString
+            let checkRange = NSRange(location: sel.location - 1, length: 1)
+            let char = ns.substring(with: checkRange)
+            if char == "☐" || char == "☑" {
+                let replacement = (char == "☐") ? "☑" : "☐"
+                let m = NSMutableAttributedString(attributedString: textView.attributedText)
+                m.replaceCharacters(in: checkRange, with: replacement)
+                textView.attributedText = m
+                textView.selectedRange = NSRange(location: sel.location + 1, length: 0)
+                parent.html = RichHTML.html(from: textView.attributedText)
+            }
+        }
+
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+            guard text == "\n" else { return true }
+            let ns = textView.text as NSString
+            let lineRange = ns.lineRange(for: NSRange(location: range.location, length: 0))
+            let currentLine = ns.substring(with: lineRange).replacingOccurrences(of: "\n", with: "")
+
+            if let nextPrefix = Self.nextListPrefix(for: currentLine) {
+                let stripped = RichTextEditorController.stripExistingListPrefix(from: currentLine)
+                let m = NSMutableAttributedString(attributedString: textView.attributedText)
+                // If user pressed Return on an empty list item, exit the list cleanly
+                if stripped.trimmingCharacters(in: .whitespaces).isEmpty {
+                    m.replaceCharacters(in: lineRange, with: NSAttributedString(string: "\n", attributes: RichHTML.baseAttributes))
+                    textView.attributedText = m
+                    textView.selectedRange = NSRange(location: lineRange.location + 1, length: 0)
+                } else {
+                    let insertStr = "\n" + nextPrefix
+                    m.replaceCharacters(in: range, with: NSAttributedString(string: insertStr, attributes: RichHTML.baseAttributes))
+                    textView.attributedText = m
+                    textView.selectedRange = NSRange(location: range.location + (insertStr as NSString).length, length: 0)
+                }
+                parent.html = RichHTML.html(from: textView.attributedText)
+                return false
+            }
+            return true
+        }
+
+        private static func nextListPrefix(for line: String) -> String? {
+            if line.hasPrefix("• ") { return "• " }
+            if line.hasPrefix("☐ ") || line.hasPrefix("☑ ") { return "☐ " }
+            if let r = line.range(of: #"^(\d+)\.\s"#, options: .regularExpression) {
+                let numStr = line[r].dropLast(2)
+                if let n = Int(numStr) { return "\(n + 1). " }
+            }
+            if let r = line.range(of: #"^([ivx]+)\.\s"#, options: .regularExpression) {
+                let rom = String(line[r].dropLast(2))
+                if let idx = RichTextEditorController.romans.firstIndex(of: rom),
+                   idx + 1 < RichTextEditorController.romans.count {
+                    return "\(RichTextEditorController.romans[idx + 1]). "
+                }
+            }
+            return nil
+        }
     }
 }
 
@@ -519,9 +637,11 @@ struct RichTextView: View {
 
     var body: some View {
         if html.plainText.isEmpty {
-            Text(emptyText)
-                .foregroundStyle(AppTheme.muted)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if !emptyText.isEmpty {
+                Text(emptyText)
+                    .foregroundStyle(AppTheme.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         } else {
             Text(AttributedString(RichHTML.attributed(from: html)))
                 .lineSpacing(5)

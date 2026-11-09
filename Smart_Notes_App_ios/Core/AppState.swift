@@ -15,16 +15,22 @@ final class AppState: ObservableObject {
     @Published var appLock = UserDefaults.standard.bool(forKey: "appLock") {
         didSet { UserDefaults.standard.set(appLock, forKey: "appLock") }
     }
+    @Published var appLockPin: String = UserDefaults.standard.string(forKey: "appLockPin") ?? "" {
+        didSet { UserDefaults.standard.set(appLockPin, forKey: "appLockPin") }
+    }
+    @Published var darkMode = UserDefaults.standard.bool(forKey: "darkMode") {
+        didSet { UserDefaults.standard.set(darkMode, forKey: "darkMode") }
+    }
     @Published var locked = false
-
+    @Published var unlockError = ""
 
     init() {
-        // Restore the saved login
         if let data = UserDefaults.standard.data(forKey: "user"),
            let saved = try? JSONDecoder().decode(AuthUser.self, from: data) {
             setUser(saved)
         }
-        locked = appLock && user != nil
+        locked = appLock && !appLockPin.isEmpty && user != nil
+        ReminderAlarmManager.shared.requestPermission()
     }
 
     func login(email: String, password: String) async throws {
@@ -37,6 +43,7 @@ final class AppState: ObservableObject {
 
     func logout() {
         user = nil
+        locked = false
         API.shared.userId = nil
         UserDefaults.standard.removeObject(forKey: "user")
     }
@@ -46,14 +53,30 @@ final class AppState: ObservableObject {
         API.shared.userId = u.userId
         UserDefaults.standard.set(try? JSONEncoder().encode(u), forKey: "user")
     }
-    
-    func unlockApp() async {
+
+    func verifyPin(_ input: String) -> Bool {
+        guard !appLockPin.isEmpty, input == appLockPin else {
+            unlockError = "Incorrect passcode. Please try again."
+            return false
+        }
+        unlockError = ""
+        locked = false
+        return true
+    }
+
+    // Uses ONLY real Face ID / Touch ID (does not allow Simulator's any-number fallback)
+    func unlockWithFaceID() async {
         let context = LAContext()
         var err: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err) else { locked = false; return }
-        if (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock Smart Notes")) == true {
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err) else {
+            return
+        }
+        if (try? await context.evaluatePolicy(
+            .deviceOwnerAuthenticationWithBiometrics,
+            localizedReason: "Unlock Smart Notes with Face ID"
+        )) == true {
+            unlockError = ""
             locked = false
         }
     }
-    
 }

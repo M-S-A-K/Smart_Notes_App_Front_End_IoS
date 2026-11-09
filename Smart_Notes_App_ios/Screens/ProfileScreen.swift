@@ -15,6 +15,8 @@ import UIKit
 
 struct ProfileScreen: View {
     @EnvironmentObject var state: AppState
+    @ObservedObject private var alarm = ReminderAlarmManager.shared
+    @State private var showRingtonePicker = false
     @State private var name = ""
     @State private var email = ""
     @State private var phone = ""
@@ -26,6 +28,8 @@ struct ProfileScreen: View {
     @State private var newPassword = ""
     @State private var confirmPassword = ""
     @State private var message = ""
+    @State private var showSetPinAlert = false
+    @State private var pinDraft = ""
 
     private var shareLink: String {
         ContactLinkHelper.makeLink(name: name, email: email, phone: phone)
@@ -59,6 +63,8 @@ struct ProfileScreen: View {
                                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                         }
+                        .buttonStyle(.plain)
+
                         Button { editing.toggle() } label: {
                             Text(editing ? "Cancel" : "Edit profile")
                                 .font(.caption.bold())
@@ -67,13 +73,13 @@ struct ProfileScreen: View {
                                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                         }
+                        .buttonStyle(.plain)
                     }
                     .foregroundStyle(AppTheme.ink)
                 }
                 .padding(18)
                 .softCard(radius: 20)
 
-                // Expandable Share Profile Link Card (matches mockup page 22)
                 if sharing {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 10) {
@@ -109,7 +115,7 @@ struct ProfileScreen: View {
                         }
                     }
                     .padding(16)
-                    .softCard(radius: 17, background: AppTheme.accentSofter, borderColor: Color(hex: "#cfecef"))
+                    .softCard(radius: 17, background: AppTheme.accentSofter, borderColor: AppTheme.accent.opacity(0.35))
                 }
 
                 if editing {
@@ -122,6 +128,96 @@ struct ProfileScreen: View {
                     }
                     .padding(16)
                     .softCard()
+                }
+
+                // Preferences Section (Dark Mode)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("ACCOUNT & PREFERENCES")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(AppTheme.accentHover)
+                    Text("Appearance").font(.headline)
+
+                    HStack(spacing: 12) {
+                        Image(systemName: state.darkMode ? "moon.fill" : "sun.max.fill")
+                            .foregroundStyle(AppTheme.accentHover)
+                            .frame(width: 38, height: 38)
+                            .background(AppTheme.accentSoft)
+                            .clipShape(RoundedRectangle(cornerRadius: 11))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Dark mode").font(.footnote.bold())
+                            Text("Switch between light and dark theme across Smart Notes.")
+                                .font(.caption2)
+                                .foregroundStyle(AppTheme.inkSoft)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $state.darkMode)
+                            .labelsHidden()
+                            .tint(AppTheme.accent)
+                    }
+                    .padding(14)
+                    .softCard()
+                    Button {
+                        withAnimation { showRingtonePicker.toggle() }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: alarm.selectedTone.icon)
+                                .foregroundStyle(AppTheme.accentHover)
+                                .frame(width: 38, height: 38)
+                                .background(AppTheme.accentSoft)
+                                .clipShape(RoundedRectangle(cornerRadius: 11))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Reminder ringtone").font(.footnote.bold()).foregroundStyle(AppTheme.ink)
+                                Text("Current tone: \(alarm.selectedTone.rawValue) (tap to change & preview)")
+                                    .font(.caption2)
+                                    .foregroundStyle(AppTheme.inkSoft)
+                            }
+                            Spacer()
+                            Image(systemName: showRingtonePicker ? "chevron.up" : "chevron.down")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.muted)
+                        }
+                        .padding(14)
+                        .softCard()
+                    }
+                    .buttonStyle(.plain)
+
+                    if showRingtonePicker {
+                        VStack(spacing: 6) {
+                            ForEach(RingtoneTone.allCases) { tone in
+                                let isSelected = alarm.selectedTone == tone
+                                Button {
+                                    alarm.selectedTone = tone
+                                    alarm.previewTone(tone)
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: tone.icon)
+                                            .foregroundStyle(isSelected ? .white : AppTheme.accentHover)
+                                            .frame(width: 30, height: 30)
+                                            .background(isSelected ? AppTheme.accent : AppTheme.accentSoft)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        Text(tone.rawValue)
+                                            .font(.caption.bold())
+                                            .foregroundStyle(AppTheme.ink)
+                                        Spacer()
+                                        if isSelected {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundStyle(AppTheme.accent)
+                                        } else {
+                                            Text("Tap to play")
+                                                .font(.caption2)
+                                                .foregroundStyle(AppTheme.muted)
+                                        }
+                                    }
+                                    .padding(10)
+                                    .background(isSelected ? AppTheme.accentSoft : AppTheme.surface)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(12)
+                        .softCard(background: AppTheme.surfaceSoft)
+                    }
                 }
 
                 // Security Section
@@ -143,9 +239,21 @@ struct ProfileScreen: View {
                                     .foregroundStyle(AppTheme.inkSoft)
                             }
                             Spacer()
-                            Toggle("", isOn: $state.appLock)
-                                .labelsHidden()
-                                .tint(AppTheme.accent)
+                            Toggle("", isOn: Binding(
+                                get: { state.appLock },
+                                set: { newValue in
+                                    if newValue {
+                                        pinDraft = ""
+                                        showSetPinAlert = true
+                                    } else {
+                                        state.appLock = false
+                                        state.appLockPin = ""
+                                        message = "App lock disabled"
+                                    }
+                                }
+                            ))
+                            .labelsHidden()
+                            .tint(AppTheme.accent)
                         }
                         .padding(14)
 
@@ -153,7 +261,7 @@ struct ProfileScreen: View {
 
                         Button { changing.toggle() } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: "lock")
+                                Image(systemName: "key")
                                     .foregroundStyle(AppTheme.accentHover)
                                     .frame(width: 38, height: 38)
                                     .background(AppTheme.accentSoft)
@@ -219,6 +327,27 @@ struct ProfileScreen: View {
             .padding(16)
         }
         .background(AppTheme.canvas)
+        .alert("Set App Lock Passcode", isPresented: $showSetPinAlert) {
+            SecureField("Passcode (4+ characters)", text: $pinDraft)
+            Button("Enable Lock") {
+                let clean = pinDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.count >= 4 {
+                    state.appLockPin = clean
+                    state.appLock = true
+                    message = "App lock enabled"
+                } else {
+                    state.appLock = false
+                    message = "Passcode must be at least 4 characters"
+                }
+                pinDraft = ""
+            }
+            Button("Cancel", role: .cancel) {
+                state.appLock = false
+                pinDraft = ""
+            }
+        } message: {
+            Text("Enter a passcode that will be required (along with Face ID) to open Smart Notes.")
+        }
         .task {
             name = state.user?.fullName ?? ""
             email = state.user?.email ?? ""
