@@ -28,7 +28,7 @@ struct AuthView: View {
                 Text(isLogin ? "Log in to your notes" : "Create your account")
                     .font(.largeTitle.bold())
 
-                if !isLogin { AppTextField(title: "Full name", text: $name) }
+                if !isLogin { AppTextField(placeholder: "Full name", text: $name) }
                 AppTextField(title: "Email", text: $email)
                 AppTextField(title: "Password", text: $password, secure: true)
 

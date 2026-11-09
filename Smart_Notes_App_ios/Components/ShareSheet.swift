@@ -5,9 +5,9 @@
 //  Created by M_Salik_Amin_Kayani on 09/11/2026.
 //
 
+
 import SwiftUI
 
-// Pick what to share (text or voice is required), then send
 struct ShareSheet: View {
     let noteId: Int
     var friend: Person? = nil
@@ -16,10 +16,19 @@ struct ShareSheet: View {
     @State private var detail: NoteDetail?
     @State private var chosen: Set<String> = ["text"]
     @State private var friends: [Person] = []
+    @State private var selectedFriendId: Int?
     @State private var error = ""
 
-    private let options = [("text", "Text"), ("location", "Location"), ("reminder", "Reminder"), ("voice", "Voice notes")]
-    private var valid: Bool { chosen.contains("text") || chosen.contains("voice") }
+    private let options = [
+        ("text", "Text"),
+        ("location", "Location"),
+        ("reminder", "Reminder"),
+        ("voice", "Voice notes")
+    ]
+
+    private var valid: Bool {
+        chosen.contains("text") || chosen.contains("voice")
+    }
 
     private func available(_ key: String) -> Bool {
         guard let d = detail else { return key == "text" }
@@ -32,78 +41,186 @@ struct ShareSheet: View {
     }
 
     var body: some View {
-        List {
-            Section("Choose what to include") {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("SHARE NOTE")
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundStyle(AppTheme.accentHover)
+            Text("Choose what to include")
+                .font(.title3.bold())
+                .foregroundStyle(AppTheme.ink)
+            Text("Include text or a voice note, then add any optional details.")
+                .font(.caption)
+                .foregroundStyle(AppTheme.inkSoft)
+
+            VStack(spacing: 8) {
                 ForEach(options, id: \.0) { item in
+                    let isAvail = available(item.0)
+                    let isSel = chosen.contains(item.0)
                     Button {
-                        if chosen.contains(item.0) { chosen.remove(item.0) } else { chosen.insert(item.0) }
+                        if isSel { chosen.remove(item.0) } else { chosen.insert(item.0) }
                     } label: {
-                        HStack {
-                            Image(systemName: chosen.contains(item.0) ? "checkmark.square.fill" : "square")
-                                .foregroundStyle(AppTheme.accent)
+                        HStack(spacing: 10) {
+                            Image(systemName: isSel ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(isSel ? AppTheme.accent : AppTheme.borderStrong)
                             Text(item.1)
+                                .font(.footnote.bold())
+                                .foregroundStyle(AppTheme.ink)
                             Spacer()
-                            if !available(item.0) { Text("Not added").font(.caption).foregroundStyle(AppTheme.muted) }
+                            if !isAvail {
+                                Text("Not added").font(.caption2).foregroundStyle(AppTheme.muted)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 44)
+                        .background(isSel ? AppTheme.accentSoft : AppTheme.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(isSel ? AppTheme.accent : AppTheme.border)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .disabled(!isAvail)
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if friend == nil && !friends.isEmpty {
+                Text("SEND TO")
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundStyle(AppTheme.accentHover)
+                    .padding(.top, 4)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(friends) { f in
+                            let active = selectedFriendId == f.id
+                            Button {
+                                selectedFriendId = f.id
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Avatar(name: f.fullName, size: 26)
+                                    Text(f.fullName).font(.caption.bold())
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(active ? AppTheme.accentSoft : AppTheme.surface)
+                                .overlay(Capsule().stroke(active ? AppTheme.accent : AppTheme.border))
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
-                    .disabled(!available(item.0))
-                    .foregroundStyle(AppTheme.ink)
                 }
             }
-            if !error.isEmpty { Text(error).foregroundStyle(AppTheme.danger) }
-            if let friend {
-                Button("Share with \(friend.fullName)") { send(to: friend) }.disabled(!valid)
-            } else {
-                Section("Send to") {
-                    ForEach(friends) { f in Button(f.fullName) { send(to: f) }.disabled(!valid) }
+
+            if !error.isEmpty {
+                Text(error).font(.caption).foregroundStyle(AppTheme.danger)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Button("Cancel") { onDone() }
+                    .font(.subheadline.bold())
+                    .foregroundStyle(AppTheme.inkSoft)
+                    .padding(.horizontal, 14)
+                Spacer()
+                Button("Share selected") {
+                    if let friend {
+                        send(to: friend.id)
+                    } else if let targetId = selectedFriendId ?? friends.first?.id {
+                        send(to: targetId)
+                    }
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(AppTheme.accent)
+                .disabled(!valid || (friend == nil && friends.isEmpty))
             }
         }
-        .navigationTitle("Share note")
-        .navigationBarTitleDisplayMode(.inline)
+        .padding(22)
+        .background(AppTheme.surface)
         .task {
-            detail = try? await API.shared.noteDetail(noteId)
-            if friend == nil { friends = (try? await API.shared.friends()) ?? [] }
+            if let d = try? await API.shared.noteDetail(noteId) {
+                detail = d
+                var initial: Set<String> = ["text"]
+                if !d.locations.isEmpty { initial.insert("location") }
+                if !d.reminders.isEmpty { initial.insert("reminder") }
+                if !d.voiceNotes.isEmpty { initial.insert("voice") }
+                chosen = initial
+            }
+            if friend == nil {
+                friends = (try? await API.shared.friends()) ?? []
+                selectedFriendId = friends.first?.id
+            }
         }
     }
 
-    private func send(to f: Person) {
+    private func send(to targetId: Int) {
         Task {
             do {
-                try await API.shared.sendMessage(to: f.id, text: nil, noteId: noteId, elements: chosen)
+                try await API.shared.sendMessage(to: targetId, text: nil, noteId: noteId, elements: chosen)
                 onDone()
-            } catch { self.error = error.localizedDescription }
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
 }
 
-// Opens a note that someone shared in chat (view only)
 struct SharedNoteSheet: View {
     let message: Message
+    var senderName: String = "a contact"
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(message.sharedTitle ?? "").font(.title.bold())
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person")
+                        Text("Shared by \(senderName) · View only")
+                    }
+                    .font(.caption.bold())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(AppTheme.accentHover)
+                    .background(AppTheme.accentSoft)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+
+                    Text(message.sharedTitle ?? "Shared note")
+                        .font(.largeTitle.bold())
+                        .foregroundStyle(AppTheme.ink)
+
                     if let p = message.payload {
-                        if let t = p.text, !t.isEmpty { Text(t).lineSpacing(6) }
-                        ForEach(p.voices ?? []) { VoiceRow(voice: $0) }
-                        if let l = p.location {
-                            Label([l.placeName, l.subLocation ?? ""].filter { !$0.isEmpty }.joined(separator: " — "),
-                                  systemImage: "mappin.and.ellipse")
+                        if let t = p.text, !t.isEmpty {
+                            RichTextView(html: t)
                         }
-                        if let r = p.reminder {
-                            Label("\(r.title) · \(r.remindAt.niceTime)", systemImage: "clock")
+                        ForEach(p.voices ?? []) { v in
+                            VoiceRow(voice: v)
                         }
+                        if p.location != nil || p.reminder != nil {
+                            HStack(alignment: .top, spacing: 8) {
+                                if let l = p.location {
+                                    MapPreviewCard(placeName: l.placeName, subLocation: l.subLocation)
+                                }
+                                if let r = p.reminder {
+                                    ReminderPreviewCard(title: r.title, remindAt: r.remindAt)
+                                }
+                            }
+                        }
+                    } else if let raw = message.sharedContent, !raw.isEmpty {
+                        RichTextView(html: raw)
                     }
                 }
-                .padding(16)
+                .padding(18)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(AppTheme.canvas)
-            .navigationTitle("Shared note · View only")
+            .background(AppTheme.surface)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: { Image(systemName: "chevron.left") }
+                }
+            }
         }
     }
 }
