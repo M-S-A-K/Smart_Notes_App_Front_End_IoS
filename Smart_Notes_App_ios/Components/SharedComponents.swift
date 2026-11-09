@@ -44,21 +44,28 @@ struct AppTextField: View {
 
 struct PrimaryButton: View {
     let title: String
+    var loading: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(.subheadline.bold())
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, minHeight: 46)
-                .background(AppTheme.accent)
-                .clipShape(RoundedRectangle(cornerRadius: 13))
-                .shadow(color: AppTheme.accent.opacity(0.26), radius: 7, y: 4)
+            HStack(spacing: 8) {
+                if loading {
+                    ProgressView()
+                        .tint(.white)
+                }
+                Text(title)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+            }
+            .frame(maxWidth: .infinity, minHeight: 46)
+            .background(AppTheme.accent)
+            .clipShape(RoundedRectangle(cornerRadius: 13))
+            .shadow(color: AppTheme.accent.opacity(0.26), radius: 7, y: 4)
         }
+        .disabled(loading)
     }
 }
-
 struct EmptyState: View {
     let icon: String
     let title: String
